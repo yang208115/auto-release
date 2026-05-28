@@ -38,12 +38,17 @@ export function handleOptions(request: Request): Response {
 }
 
 export function extractCredentials(request: Request): ClientCredentials {
+    const getHeader = (name: string) => {
+        const val = request.headers.get(name);
+        return (val && val.trim() !== '' && val !== 'null' && val !== 'undefined') ? val.trim() : undefined;
+    };
+
     return {
-        githubToken: request.headers.get('x-github-token') || undefined,
-        openaiKey: request.headers.get('x-openai-key') || undefined,
-        anthropicKey: request.headers.get('x-anthropic-key') || undefined,
-        aiBaseUrl: request.headers.get('x-ai-base-url') || undefined,
-        aiModel: request.headers.get('x-ai-model') || undefined,
+        githubToken: getHeader('x-github-token'),
+        openaiKey: getHeader('x-openai-key'),
+        anthropicKey: getHeader('x-anthropic-key'),
+        aiBaseUrl: getHeader('x-ai-base-url'),
+        aiModel: getHeader('x-ai-model'),
     };
 }
 

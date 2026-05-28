@@ -2,7 +2,82 @@ import { GitHubCommitItem, ClientCredentials } from './types.js';
 import { APIError } from './utils.js';
 
 /**
+ * Internal helper for GitHub API requests with caching and auth
+ */
+async function fetchGitHub(
+    url: string,
+    credentials: ClientCredentials
+): Promise<Response> {
+    const cache = caches.default;
+    const headers: Record<string, string> = {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'Cloudflare-Worker-AutoRelease',
+    };
+
+    if (credentials.githubToken) {
+        headers['Authorization'] = `token ${credentials.githubToken}`;
+    }
+
+    const cacheRequest = new Request(url, {
+        method: 'GET',
+        headers
+    });
+
+    let response = await cache.match(cacheRequest);
+
+    if (!response) {
+        response = await fetch(cacheRequest);
+
+        if (response.status === 200) {
+            const responseToCache = new Response(response.clone().body, response);
+            responseToCache.headers.append('Cache-Control', 's-maxage=1800');
+            try { await cache.put(cacheRequest, responseToCache); } catch (e) { }
+        }
+    }
+
+    if (!response.ok) {
+        let errorMsg = `GitHub API responded with ${response.status} ${response.statusText}`;
+        try {
+            const data = await response.json() as Record<string, any>;
+            errorMsg = data.message || errorMsg;
+        } catch (e) { }
+
+        let statusCode = response.status;
+        if (statusCode === 401) {
+            errorMsg = 'GitHub 鉴权失败：Token 无效或已过期。请在配置选项中检查您的 GitHub Token。';
+        } else if (statusCode === 403 && errorMsg.toLowerCase().includes('rate limit')) {
+            errorMsg = '获取 GitHub 数据失败：API 访问额度已耗尽。请提供 GitHub Token 以提高额度。';
+        } else if (statusCode === 404) {
+            statusCode = 400;
+            errorMsg = '获取 GitHub 数据失败：未找到目标仓库或版本。';
+        } else {
+            errorMsg = `GitHub API 错误: ${errorMsg}`;
+        }
+
+        throw new APIError(errorMsg, statusCode);
+    }
+
+    return response;
+}
+
+/**
  * Fetch commits until a specific tag or a max number, utilizing caching
+ */
+/**
+ * Fetch all tags for a repository
+ */
+export async function getTags(
+    owner: string,
+    repo: string,
+    credentials: ClientCredentials
+): Promise<{ name: string }[]> {
+    const url = `https://api.github.com/repos/${owner}/${repo}/tags?per_page=100`;
+    const response = await fetchGitHub(url, credentials);
+    return await response.json() as { name: string }[];
+}
+
+/**
+ * Fetch commits between tags or for a single tag
  */
 export async function getCommits(
     owner: string,
@@ -10,63 +85,28 @@ export async function getCommits(
     tag: string,
     credentials: ClientCredentials
 ): Promise<GitHubCommitItem[]> {
-    const url = `https://api.github.com/repos/${owner}/${repo}/commits?sha=${tag}&per_page=50`;
+    // 1. Fetch tags to find the previous one
+    let range = tag;
+    try {
+        const tags = await getTags(owner, repo, credentials);
+        const currentIndex = tags.findIndex(t => t.name === tag);
 
-    // Use Cloudflare standard cache based on Request URL
-    const cache = caches.default;
-    const cacheRequest = new Request(url, {
-        method: 'GET',
-        headers: {
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'Cloudflare-Worker-AutoRelease',
-            ...(credentials.githubToken ? { 'Authorization': `Bearer ${credentials.githubToken}` } : {})
+        if (currentIndex !== -1 && currentIndex < tags.length - 1) {
+            const previousTag = tags[currentIndex + 1].name;
+            range = `${previousTag}...${tag}`;
         }
-    });
-
-    // Check cache first (Cache API works primarily for GETs with 200/Cache-Control statuses)
-    let response = await cache.match(cacheRequest);
-
-    if (!response) {
-        // Determine whether to fetch upstream
-        response = await fetch(cacheRequest);
-
-        // Attempt cache insertion for successful GET fetches
-        if (response.status === 200) {
-            // Put cloned response to cache, expires in 30 minutes to save GH API quota
-            const responseToCache = new Response(response.clone().body, response);
-            responseToCache.headers.append('Cache-Control', 's-maxage=1800');
-            // Intentionally ignore potential failure if local worker doesn't support cache API seamlessly
-            try {
-                await cache.put(cacheRequest, responseToCache);
-            } catch (e) {
-                // ignore cache errors
-            }
-        }
+    } catch (e) {
+        console.warn('Failed to fetch tags for range detection, falling back to single tag:', e);
     }
 
-    if (!response.ok) {
-        let errorMsg = `GitHub API responded with ${response.status} ${response.statusText}`;
-        try {
-            const data = await response.json() as Record<string, string>;
-            errorMsg = data.message || errorMsg;
-        } catch (e) {
-            // Body not parsable
-        }
+    console.log('Fetching commits for range:', range);
+    const url = `https://api.github.com/repos/${owner}/${repo}/compare/${range}`;
+    const response = await fetchGitHub(url, credentials);
+    const data = await response.json() as { commits: GitHubCommitItem[] };
 
-        let statusCode = response.status;
-        if (statusCode === 404) {
-            statusCode = 400; // Map 404 to 400 to distinguish from standard route 404s
-            errorMsg += ' (Please check if the repo exists and is accessible)';
-        }
-
-        throw new APIError(`Failed to fetch commits from GitHub: ${errorMsg}`, statusCode);
+    if (!data || !Array.isArray(data.commits)) {
+        throw new APIError('Invalid response format from GitHub API: expected commits array', 500);
     }
 
-    const commits = await response.json() as GitHubCommitItem[];
-
-    if (!Array.isArray(commits)) {
-        throw new APIError('Invalid response format from GitHub API', 500);
-    }
-
-    return commits;
+    return data.commits;
 }

@@ -63,7 +63,7 @@ els.settingsForm.addEventListener('submit', (e) => {
 
 // Toast functionality
 let toastTimeout;
-function showToast(message, bgColorClass = 'bg-zinc-800') {
+function showToast(message, bgColorClass = 'bg-zinc-800', duration = 3000) {
   els.toast.textContent = message;
 
   // Reset classes
@@ -75,7 +75,7 @@ function showToast(message, bgColorClass = 'bg-zinc-800') {
   toastTimeout = setTimeout(() => {
     els.toast.style.opacity = '0';
     setTimeout(() => els.toast.classList.add('hidden'), 300);
-  }, 3000);
+  }, duration);
 }
 
 // Copy to Clipboard
@@ -185,7 +185,7 @@ els.generateForm.addEventListener('submit', async (e) => {
 
   } catch (err) {
     console.error(err);
-    showToast(`错误: ${err.message}`, 'bg-red-600');
+    showToast(`错误: ${err.message}`, 'bg-red-600', 5000);
   } finally {
     els.generateBtn.disabled = false;
     btnText.textContent = '生成发布说明';
